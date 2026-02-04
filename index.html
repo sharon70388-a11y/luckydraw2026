@@ -1,0 +1,501 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Plus, Trash2, X, Play, Square, RotateCcw } from 'lucide-react';
+
+// --- 色票定義 (復古紅白藍) ---
+const COLORS = [
+  '#C62828', // 復古紅
+  '#F5F5F5', // 米白
+  '#1565C0', // 復古藍
+];
+const GOLD = '#FFD700'; // 金色
+const GOLD_DARK = '#B7950B'; // 深金色
+
+export default function App() {
+  // --- 狀態管理 ---
+  // 預設資料：2欄10列 (此處先預填幾筆範例，其餘為空)
+  const generateInitialData = () => {
+    const data = Array.from({ length: 10 }, (_, i) => ({
+      id: Date.now() + i,
+      name: i === 0 ? '陳語宸' : i === 1 ? '陳小明' : '',
+      value: i === 0 ? 20000 : i === 1 ? 4 : '',
+      color: COLORS[i % COLORS.length]
+    }));
+    return data;
+  };
+
+  const [items, setItems] = useState(generateInitialData);
+  const [unit, setUnit] = useState('萬元'); // 預設單位
+  const [title, setTitle] = useState('幸運轉盤');
+  const [isSpinning, setIsSpinning] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [rotation, setRotation] = useState(0); // 總旋轉角度
+  const [winner, setWinner] = useState(null); // 中獎者資訊
+  const [showModal, setShowModal] = useState(false);
+
+  // Canvas 參考
+  const canvasRef = useRef(null);
+  const requestRef = useRef();
+  const speedRef = useRef(0);
+  const stoppingStartTimeRef = useRef(0);
+  const initialStoppingSpeedRef = useRef(0);
+
+  // --- 計算邏輯 ---
+
+  // 計算有效項目的總值 (排除空值或非數字)
+  const getTotal = useCallback(() => {
+    return items.reduce((sum, item) => {
+      const val = parseFloat(item.value);
+      return sum + (isNaN(val) ? 0 : val);
+    }, 0);
+  }, [items]);
+
+  // 計算每個項目的角度範圍
+  const getSlices = useCallback(() => {
+    const total = getTotal();
+    let currentAngle = 0;
+    const validItems = items.filter(i => parseFloat(i.value) > 0 && i.name.trim() !== '');
+    
+    // 如果沒有有效資料，回傳空
+    if (total === 0 || validItems.length === 0) return [];
+
+    return validItems.map((item, index) => {
+      const val = parseFloat(item.value);
+      const angle = (val / total) * 360; // 該項目佔的角度
+      const slice = {
+        ...item,
+        startAngle: currentAngle,
+        endAngle: currentAngle + angle,
+        color: COLORS[index % COLORS.length] // 重新分配顏色確保連續性
+      };
+      currentAngle += angle;
+      return slice;
+    });
+  }, [items, getTotal]);
+
+  // --- 動畫迴圈 ---
+  const animate = useCallback((time) => {
+    if (isSpinning && !isStopping) {
+      // 持續旋轉階段
+      speedRef.current = 20; // 固定速度
+      setRotation(prev => (prev + speedRef.current) % 360);
+      requestRef.current = requestAnimationFrame(animate);
+    } else if (isStopping) {
+      // 停止階段 (1.5秒緩衝)
+      if (!stoppingStartTimeRef.current) stoppingStartTimeRef.current = time;
+      
+      const elapsed = time - stoppingStartTimeRef.current;
+      const duration = 1500; // 1.5秒
+      
+      if (elapsed < duration) {
+        // 線性減速
+        const progress = elapsed / duration;
+        // 速度從 initial 降到 0
+        const currentSpeed = initialStoppingSpeedRef.current * (1 - progress);
+        
+        // 使用 easeOutCubic 讓停止更自然 (選用)
+        // const easeOut = 1 - Math.pow(1 - progress, 3);
+        
+        setRotation(prev => (prev + currentSpeed) % 360);
+        requestRef.current = requestAnimationFrame(animate);
+      } else {
+        // 完全停止
+        setIsSpinning(false);
+        setIsStopping(false);
+        determineWinner();
+      }
+    }
+  }, [isSpinning, isStopping]);
+
+  useEffect(() => {
+    if (isSpinning) {
+      requestRef.current = requestAnimationFrame(animate);
+    }
+    return () => cancelAnimationFrame(requestRef.current);
+  }, [isSpinning, isStopping, animate]);
+
+  // --- 判斷中獎者 ---
+  const determineWinner = () => {
+    const slices = getSlices();
+    if (slices.length === 0) return;
+
+    // 指針在右上角 45度 (Canvas 0度是3點鐘，順時針)
+    // 視覺上的 45度位置 (1:30方向) 對應 Canvas 座標系約為 315度 (-45度)
+    // 但為了簡化，我們計算相對角度。
+    
+    // 我們需要計算：當轉盤停下時，哪一個扇形區域落在了指針下方。
+    // 指針是固定的，轉盤在動。
+    // 指針位置固定在 Canvas 的 270deg (12點) + 45deg = 315deg (右上) ?
+    // 讓我們定義指針角度：
+    const POINTER_ANGLE = 315; // 右上角 45度 (逆時針看是315，順時針看是-45，相對於3點鐘0度)
+    
+    // 目前轉盤轉了 rotation 度。
+    // 某個 slice 的範圍是 [start, end]
+    // 經過旋轉後，該 slice 的範圍變成了 [start + rotation, end + rotation]
+    // 我們要找的是：哪個 slice 包含 POINTER_ANGLE
+    
+    // 正規化 rotation 到 0-360
+    const normalizedRotation = rotation % 360;
+    
+    // 逆推：指針在轉盤上的相對位置 = (指針角度 - 轉盤旋轉角度)
+    // 需要處理負數並 mod 360
+    let relativePointerAngle = (POINTER_ANGLE - normalizedRotation) % 360;
+    if (relativePointerAngle < 0) relativePointerAngle += 360;
+
+    const winnerSlice = slices.find(s => 
+      relativePointerAngle >= s.startAngle && relativePointerAngle < s.endAngle
+    );
+
+    if (winnerSlice) {
+      setWinner(winnerSlice);
+      setShowModal(true);
+    }
+  };
+
+  // --- 繪製轉盤 ---
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radius = Math.min(width, height) / 2 - 20; // 留邊距
+
+    // 清空畫布
+    ctx.clearRect(0, 0, width, height);
+
+    const slices = getSlices();
+    const totalValue = getTotal();
+
+    // 儲存當前狀態以進行旋轉
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.rotate((rotation * Math.PI) / 180);
+
+    if (slices.length === 0) {
+      // 繪製空轉盤背景
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, 2 * Math.PI);
+      ctx.fillStyle = '#eee';
+      ctx.fill();
+      ctx.strokeStyle = '#ccc';
+      ctx.stroke();
+      // 文字
+      ctx.fillStyle = '#999';
+      ctx.font = '20px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('請輸入資料', 0, 0);
+    } else {
+      // 繪製扇形
+      slices.forEach(slice => {
+        const startRad = (slice.startAngle * Math.PI) / 180;
+        const endRad = (slice.endAngle * Math.PI) / 180;
+
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, radius, startRad, endRad);
+        ctx.closePath();
+        ctx.fillStyle = slice.color;
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#fff';
+        ctx.stroke();
+
+        // 繪製文字 (在扇形中間)
+        ctx.save();
+        const midRad = (startRad + endRad) / 2;
+        ctx.rotate(midRad);
+        ctx.translate(radius * 0.6, 0); // 文字距離圓心的距離
+        
+        // 判定文字顏色：如果是米白色背景(#F5F5F5)，字體改為深色(#334155)，否則維持白色
+        ctx.fillStyle = slice.color === '#F5F5F5' ? '#334155' : '#fff';
+
+        // 根據扇形大小動態調整字體 (加大字體)
+        const angleDiff = slice.endAngle - slice.startAngle;
+        let fontSize = 24; // 預設字體加大
+        if (angleDiff < 15) fontSize = 14;
+        else if (angleDiff < 30) fontSize = 18;
+        else if (angleDiff < 45) fontSize = 20;
+        
+        ctx.font = `bold ${fontSize}px "Noto Sans TC", sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        // 名字 (只顯示名字)
+        ctx.fillText(slice.name, 0, 0);
+        
+        ctx.restore();
+      });
+    }
+
+    ctx.restore(); // 恢復旋轉前的狀態
+
+    // --- 繪製指針 (固定在右上角 45度) ---
+    // 45度 = -45度 (逆時針) = 315度
+    const pointerAngleRad = (315 * Math.PI) / 180; 
+    const pointerLen = 40;
+    
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    // 移動到圓周邊緣
+    const px = Math.cos(pointerAngleRad) * (radius + 10);
+    const py = Math.sin(pointerAngleRad) * (radius + 10);
+    
+    ctx.translate(px, py);
+    ctx.rotate(pointerAngleRad + Math.PI); // 指向圓心
+
+    // 畫金色三角形指針
+    ctx.beginPath();
+    ctx.moveTo(0, 0); // 尖端 (稍微縮進去一點)
+    ctx.lineTo(-15, 30);
+    ctx.lineTo(15, 30);
+    ctx.closePath();
+    
+    ctx.fillStyle = GOLD;
+    ctx.fill();
+    ctx.strokeStyle = GOLD_DARK;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    ctx.restore();
+
+  }, [items, rotation, getSlices, getTotal]);
+
+
+  // --- 操作處理 ---
+
+  const handleStart = () => {
+    if (getSlices().length === 0) {
+      alert('請先輸入有效的名字與數值！');
+      return;
+    }
+    if (isSpinning) {
+      // 點擊停下
+      setIsStopping(true);
+      stoppingStartTimeRef.current = 0;
+      initialStoppingSpeedRef.current = speedRef.current;
+    } else {
+      // 點擊開始
+      setWinner(null);
+      setIsSpinning(true);
+      setIsStopping(false);
+      speedRef.current = 0;
+    }
+  };
+
+  const handleInputChange = (id, field, value) => {
+    setItems(prev => prev.map(item => 
+      item.id === id ? { ...item, [field]: value } : item
+    ));
+  };
+
+  const addRow = () => {
+    setItems(prev => [
+      ...prev,
+      { id: Date.now(), name: '', value: '', color: '#000' }
+    ]);
+  };
+
+  const deleteRow = (id) => {
+    setItems(prev => prev.filter(item => item.id !== id));
+  };
+
+  const removeWinner = () => {
+    if (winner) {
+      deleteRow(winner.id);
+      setShowModal(false);
+      setWinner(null);
+      // 重置轉盤角度，讓視覺上看起來更新了
+      setRotation(0);
+    }
+  };
+
+  // 總計格式化
+  const total = getTotal();
+
+  return (
+    <div className="flex h-screen w-full bg-slate-100 font-sans text-slate-800 overflow-hidden">
+      
+      {/* 左側：轉盤區 (改為 70%) */}
+      <div className="w-[70%] h-full flex flex-col items-center justify-center relative bg-slate-200 border-r-4 border-slate-300 shadow-inner p-4">
+        
+        {/* 自訂標題 */}
+        <input 
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          className="text-4xl font-black text-slate-700 bg-transparent text-center mb-4 border-b-2 border-transparent hover:border-slate-400 focus:border-slate-500 focus:outline-none transition-colors"
+          placeholder="點擊輸入標題"
+        />
+
+          {/* Canvas 容器 */}
+        <div className="relative">
+          {/* 外圈裝飾 */}
+          <div className="rounded-full border-8 border-slate-300 shadow-2xl bg-white p-2">
+            <canvas 
+              ref={canvasRef} 
+              width={600} 
+              height={600} 
+              className="rounded-full max-w-full h-auto"
+              style={{ maxHeight: '75vh', maxWidth: '75vh' }}
+            />
+          </div>
+
+          {/* 中心按鈕 (絕對定位) */}
+          <button
+            onClick={handleStart}
+            disabled={isStopping}
+            className={`
+              absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2
+              w-24 h-24 rounded-full border-4 shadow-xl z-10 flex flex-col items-center justify-center
+              transition-all active:scale-95 hover:brightness-110
+              text-white font-bold text-xl
+            `}
+            style={{
+              backgroundColor: isSpinning ? (isStopping ? '#7f8c8d' : '#C62828') : GOLD,
+              borderColor: GOLD_DARK,
+              color: isSpinning ? 'white' : '#5D4037',
+              textShadow: isSpinning ? 'none' : '0px 1px 0px rgba(255,255,255,0.4)'
+            }}
+          >
+            {isSpinning ? (isStopping ? '減速中' : '停下') : '開始'}
+            {!isSpinning && <Play size={20} className="mt-1 opacity-80" />}
+            {isSpinning && !isStopping && <Square size={16} fill="white" className="mt-1" />}
+          </button>
+        </div>
+      </div>
+
+      {/* 右側：輸入區 (改為 30%) */}
+      <div className="w-[30%] h-full flex flex-col bg-white shadow-xl z-20">
+        <div className="p-6 bg-slate-800 text-white flex justify-between items-center shadow-md">
+          <h2 className="text-xl font-bold flex items-center gap-2">
+            <RotateCcw size={20} />
+            轉盤設定
+          </h2>
+          <div className="flex items-center gap-2 text-sm">
+            <span>數值單位：</span>
+            <input 
+              value={unit} 
+              onChange={(e) => setUnit(e.target.value)}
+              className="w-16 px-2 py-1 rounded text-slate-800 font-bold text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4">
+          <table className="w-full text-left border-collapse">
+            <thead className="sticky top-0 bg-white shadow-sm z-10">
+              <tr className="text-slate-500 border-b-2 border-slate-200">
+                <th className="p-2 w-12 text-center">#</th>
+                <th className="p-2">名字</th>
+                <th className="p-2">數值 ({unit})</th>
+                <th className="p-2 w-20 text-right">佔比</th>
+                <th className="p-2 w-10"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item, index) => {
+                const val = parseFloat(item.value) || 0;
+                const percent = total > 0 ? ((val / total) * 100).toFixed(1) : '0.0';
+                
+                return (
+                  <tr key={item.id} className="border-b border-slate-100 hover:bg-blue-50 transition-colors group">
+                    <td className="p-2 text-center text-slate-400 font-mono text-sm">{index + 1}</td>
+                    <td className="p-2">
+                      <input 
+                        type="text"
+                        value={item.name}
+                        onChange={(e) => handleInputChange(item.id, 'name', e.target.value)}
+                        placeholder="輸入名字"
+                        className="w-full bg-transparent border border-transparent hover:border-slate-300 focus:border-blue-500 rounded px-2 py-1 outline-none transition-all"
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input 
+                        type="number"
+                        value={item.value}
+                        onChange={(e) => handleInputChange(item.id, 'value', e.target.value)}
+                        placeholder="0"
+                        className="w-full bg-transparent border border-transparent hover:border-slate-300 focus:border-blue-500 rounded px-2 py-1 outline-none transition-all font-mono"
+                      />
+                    </td>
+                    <td className="p-2 text-right text-slate-600 font-medium text-sm">
+                      {percent}%
+                    </td>
+                    <td className="p-2 text-center">
+                      <button 
+                        onClick={() => deleteRow(item.id)}
+                        className="text-slate-300 hover:text-red-500 transition-colors p-1 rounded-full hover:bg-red-50"
+                        title="刪除"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          
+          <button 
+            onClick={addRow}
+            className="w-full mt-4 py-3 border-2 border-dashed border-slate-300 rounded-lg text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-all flex items-center justify-center gap-2 font-medium"
+          >
+            <Plus size={18} /> 新增列
+          </button>
+        </div>
+
+        {/* 總計 Footer */}
+        <div className="p-4 bg-slate-50 border-t border-slate-200">
+          <div className="flex justify-between items-center text-lg font-bold text-slate-700">
+            <span>總額</span>
+            <span className="font-mono text-2xl text-blue-800">
+              {total.toLocaleString()} <span className="text-sm text-slate-500">{unit}</span>
+            </span>
+          </div>
+          <div className="mt-2 text-xs text-slate-400 text-right">
+            共 {items.length} 筆資料，有效 {items.filter(i => i.value > 0).length} 筆
+          </div>
+        </div>
+      </div>
+
+      {/* 結果 Modal */}
+      {showModal && winner && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in duration-300">
+          <div className="bg-white rounded-2xl shadow-2xl w-96 transform transition-all scale-100 p-0 overflow-hidden border-4 border-yellow-400">
+            <div className="bg-yellow-400 p-4 flex justify-center items-center">
+               <h3 className="text-yellow-900 font-black text-2xl tracking-widest">🎉 結果出爐 🎉</h3>
+            </div>
+            <div className="p-8 text-center">
+              <div className="text-slate-500 text-lg mb-2">指針停在了...</div>
+              <div className="text-4xl font-black text-red-600 mb-2">{winner.name}</div>
+              <div className="text-xl text-slate-600 font-medium">
+                {Number(winner.value).toLocaleString()} {unit}
+              </div>
+              <div className="text-sm text-slate-400 mt-1">
+                (佔比 {((parseFloat(winner.value) / total) * 100).toFixed(1)}%)
+              </div>
+            </div>
+            <div className="flex border-t border-slate-100">
+              <button 
+                onClick={() => setShowModal(false)}
+                className="flex-1 py-4 text-slate-600 font-bold hover:bg-slate-50 transition-colors border-r border-slate-100"
+              >
+                繼續 (保留)
+              </button>
+              <button 
+                onClick={removeWinner}
+                className="flex-1 py-4 text-red-600 font-bold hover:bg-red-50 transition-colors flex items-center justify-center gap-2"
+              >
+                <Trash2 size={18} />
+                移除該人
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
